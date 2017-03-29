@@ -115,6 +115,7 @@
 #define VERIFY_16	      0x8f
 #define SYNCHRONIZE_CACHE_16  0x91
 #define WRITE_SAME_16	      0x93
+#define WRITE_STREAM_16       0x9a
 #define ZBC_OUT		      0x94
 #define ZBC_IN		      0x95
 #define SERVICE_ACTION_BIDIRECTIONAL 0x9d
@@ -124,6 +125,9 @@
 #define	SAI_READ_CAPACITY_16  0x10
 #define SAI_GET_LBA_STATUS    0x12
 #define SAI_REPORT_REFERRALS  0x13
+#define SAI_STREAM_CONTROL    0x14
+#define SAI_BACKGROUND_CONTROL    0x15
+#define SAI_GET_STREAM_STATUS     0x16
 /* values for VARIABLE_LENGTH_CMD service action codes
  * see spc4r17 Section D.3.5, table D.7 and D.8 */
 #define VLC_SA_RECEIVE_CREDENTIAL 0x1800
@@ -161,6 +165,7 @@
 #define VERIFY_32	      0x0a
 #define WRITE_32	      0x0b
 #define WRITE_SAME_32	      0x0d
+#define WRITE_STREAM_32       0x10
 
 /* Values for T10/04-262r7 */
 #define	ATA_16		      0x85	/* 16-byte pass-thru */

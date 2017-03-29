@@ -32,6 +32,7 @@ struct bio {
 						 */
 	unsigned short		bi_flags;	/* status, command, etc */
 	unsigned short		bi_ioprio;
+	unsigned short		bi_streamid;
 
 	struct bvec_iter	bi_iter;
 
@@ -141,6 +142,16 @@ struct bio {
 #define BVEC_POOL_BITS		(4)
 #define BVEC_POOL_OFFSET	(16 - BVEC_POOL_BITS)
 #define BVEC_POOL_IDX(bio)	((bio)->bi_flags >> BVEC_POOL_OFFSET)
+
+static inline void bio_set_streamid(struct bio *bio, unsigned int id)
+{
+	bio->bi_streamid = id;
+}
+
+static inline unsigned int bio_get_streamid(struct bio *bio)
+{
+	return bio->bi_streamid;
+}
 
 #endif /* CONFIG_BLOCK */
 

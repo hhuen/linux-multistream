@@ -70,6 +70,8 @@
 #include "scsi_priv.h"
 #include "scsi_logging.h"
 
+#include <trace/events/block.h>
+
 MODULE_AUTHOR("Eric Youngdale");
 MODULE_DESCRIPTION("SCSI disk (sd) driver");
 MODULE_LICENSE("GPL");
@@ -908,6 +910,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 	unsigned int dif, dix;
 	int ret;
 	unsigned char protect;
+	unsigned short str_id = 0;
 
 	ret = scsi_init_io(SCpnt);
 	if (ret != BLKPREP_OK)
@@ -960,7 +963,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		}
 	}
 
-	SCSI_LOG_HLQUEUE(2, scmd_printk(KERN_INFO, SCpnt, "block=%llu\n",
+	SCSI_LOG_HLQUEUE(3, scmd_printk(KERN_INFO, SCpnt, "block=%llu\n",
 					(unsigned long long)block));
 
 	/*
@@ -1009,6 +1012,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 
 		if (blk_integrity_rq(rq))
 			sd_dif_prepare(SCpnt);
+		str_id = bio_get_streamid(rq->bio);
 
 	} else if (rq_data_dir(rq) == READ) {
 		SCpnt->cmnd[0] = READ_6;
@@ -1019,10 +1023,14 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 	}
 
 	SCSI_LOG_HLQUEUE(2, scmd_printk(KERN_INFO, SCpnt,
-					"%s %d/%u 512 byte blocks.\n",
-					(rq_data_dir(rq) == WRITE) ?
-					"writing" : "reading", this_count,
-					blk_rq_sectors(rq)));
+				"%s block: %llu, count: %d/%u, stream_id: %u\n",
+				(rq_data_dir(rq) == WRITE) ? "writing" : "reading",
+				(unsigned long long)block, this_count,
+				blk_rq_sectors(rq), str_id));
+
+	if (rq_data_dir(rq))
+		blk_add_trace_msg(rq->q, "off:%llu; len:%d; sid:%d",
+			(unsigned long long) block, this_count, str_id);
 
 	dix = scsi_prot_sg_count(SCpnt);
 	dif = scsi_host_dif_capable(SCpnt->device->host, sdkp->protection_type);
@@ -1044,7 +1052,19 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		memset(SCpnt->cmnd, 0, SCpnt->cmd_len);
 		SCpnt->cmnd[0] = VARIABLE_LENGTH_CMD;
 		SCpnt->cmnd[7] = 0x18;
-		SCpnt->cmnd[9] = (rq_data_dir(rq) == READ) ? READ_32 : WRITE_32;
+		if (rq_data_dir(rq) == READ) {
+			SCpnt->cmnd[9] = READ_32;
+		}
+		else {
+			if (str_id) {
+				SCpnt->cmnd[4] = (unsigned char) (str_id >> 8) & 0xff;
+				SCpnt->cmnd[5] = (unsigned char) str_id & 0xff;
+				SCpnt->cmnd[9] = WRITE_STREAM_32;
+			}
+			else
+				SCpnt->cmnd[9] = WRITE_32;
+		}
+
 		SCpnt->cmnd[10] = protect | ((rq->cmd_flags & REQ_FUA) ? 0x8 : 0);
 
 		/* LBA */
@@ -1068,7 +1088,7 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		SCpnt->cmnd[29] = (unsigned char) (this_count >> 16) & 0xff;
 		SCpnt->cmnd[30] = (unsigned char) (this_count >> 8) & 0xff;
 		SCpnt->cmnd[31] = (unsigned char) this_count & 0xff;
-	} else if (sdp->use_16_for_rw || (this_count > 0xffff)) {
+	} else if (sdp->use_16_for_rw || (this_count > 0xffff) || str_id) {
 		SCpnt->cmnd[0] += READ_16 - READ_6;
 		SCpnt->cmnd[1] = protect | ((rq->cmd_flags & REQ_FUA) ? 0x8 : 0);
 		SCpnt->cmnd[2] = sizeof(block) > 4 ? (unsigned char) (block >> 56) & 0xff : 0;
@@ -1084,6 +1104,11 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		SCpnt->cmnd[12] = (unsigned char) (this_count >> 8) & 0xff;
 		SCpnt->cmnd[13] = (unsigned char) this_count & 0xff;
 		SCpnt->cmnd[14] = SCpnt->cmnd[15] = 0;
+		if (str_id && (this_count <= 0xffff)) {
+			SCpnt->cmnd[0] = WRITE_STREAM_16;
+			SCpnt->cmnd[10] = (unsigned char) (str_id >> 8) & 0xff;
+			SCpnt->cmnd[11] = (unsigned char) str_id & 0xff;
+		}
 	} else if ((this_count > 0xff) || (block > 0x1fffff) ||
 		   scsi_device_protection(SCpnt->device) ||
 		   SCpnt->device->use_10_for_rw) {
@@ -2697,7 +2722,10 @@ static void sd_read_block_limits(struct scsi_disk *sdkp)
 				sd_config_discard(sdkp, SD_LBP_WS16);
 
 		} else {	/* LBP VPD page tells us what to use */
-			if (sdkp->lbpu && sdkp->max_unmap_blocks && !sdkp->lbprz)
+			/*if (sdkp->lbpu && sdkp->max_unmap_blocks && !sdkp->lbprz)*/
+			/* --hkh: prefer unmap instead of ws16 to speed up trim */
+			/*        for test purpose only, revert back to original when release */
+			if (sdkp->lbpu && sdkp->max_unmap_blocks)
 				sd_config_discard(sdkp, SD_LBP_UNMAP);
 			else if (sdkp->lbpws)
 				sd_config_discard(sdkp, SD_LBP_WS16);

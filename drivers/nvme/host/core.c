@@ -28,6 +28,7 @@
 #include <linux/t10-pi.h>
 #include <scsi/sg.h>
 #include <asm/unaligned.h>
+#include <trace/events/block.h>
 
 #include "nvme.h"
 #include "fabrics.h"
@@ -284,6 +285,7 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 {
 	u16 control = 0;
 	u32 dsmgmt = 0;
+	u16 dspec = bio_get_streamid(req->bio);
 
 	if (req->cmd_flags & REQ_FUA)
 		control |= NVME_RW_FUA;
@@ -292,6 +294,11 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 
 	if (req->cmd_flags & REQ_RAHEAD)
 		dsmgmt |= NVME_RW_DSM_FREQ_PREFETCH;
+
+	if (rq_data_dir(req) && dspec) {
+		control |= NVME_RW_DTYPE_STREAMS;
+		dsmgmt  |= dspec << 16;
+	}
 
 	memset(cmnd, 0, sizeof(*cmnd));
 	cmnd->rw.opcode = (rq_data_dir(req) ? nvme_cmd_write : nvme_cmd_read);
@@ -319,6 +326,10 @@ static inline void nvme_setup_rw(struct nvme_ns *ns, struct request *req,
 
 	cmnd->rw.control = cpu_to_le16(control);
 	cmnd->rw.dsmgmt = cpu_to_le32(dsmgmt);
+	if (rq_data_dir(req))
+		blk_add_trace_msg(ns->queue, "off:%lld; len:%d; dtype:%d; dspec:%d; nsid:%d",
+			cmnd->rw.slba, cmnd->rw.length+1, control>>4, dspec, cmnd->rw.nsid);
+
 }
 
 int nvme_setup_cmd(struct nvme_ns *ns, struct request *req,
@@ -567,6 +578,19 @@ int nvme_identify_ctrl(struct nvme_ctrl *dev, struct nvme_id_ctrl **id)
 	return error;
 }
 
+int nvme_enable_directive(struct nvme_ctrl *dev, unsigned nsid, unsigned dir)
+{
+	struct nvme_command c = { };
+	c.directive.opcode = nvme_admin_directive_send;
+	c.directive.nsid = cpu_to_le32(nsid);
+	c.directive.doper = NVME_DIR_SND_ID_OP_ENABLE;
+	c.directive.dtype = NVME_DIR_IDENTIFY;
+	c.directive.tdtype = dir;
+	c.directive.endir = NVME_DIR_ENDIR;
+
+	return nvme_submit_sync_cmd(dev->admin_q, &c, NULL, 0);
+}
+
 static int nvme_identify_ns_list(struct nvme_ctrl *dev, unsigned nsid, __le32 *ns_list)
 {
 	struct nvme_command c = { };
@@ -730,6 +754,10 @@ static int nvme_submit_io(struct nvme_ns *ns, struct nvme_user_io __user *uio)
 	c.rw.reftag = cpu_to_le32(io.reftag);
 	c.rw.apptag = cpu_to_le16(io.apptag);
 	c.rw.appmask = cpu_to_le16(io.appmask);
+	if (io.opcode == nvme_cmd_write)
+		blk_add_trace_msg(ns->queue, "off:%lld; len:%d; dtype:%d; dspec:%d; nsid:%d",
+			c.rw.slba, c.rw.length+1, c.rw.control>>4, c.rw.dsmgmt>>16, c.rw.nsid);
+
 
 	return __nvme_submit_user_cmd(ns->queue, &c,
 			(void __user *)(uintptr_t)io.addr, length,
@@ -763,6 +791,11 @@ static int nvme_user_cmd(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
 	c.common.cdw10[3] = cpu_to_le32(cmd.cdw13);
 	c.common.cdw10[4] = cpu_to_le32(cmd.cdw14);
 	c.common.cdw10[5] = cpu_to_le32(cmd.cdw15);
+/*
+	printk(KERN_INFO "%s:%d opcode:%#x; cdw10:%#x; cdw11:%#x; cdw12:%#x; ns:%#x\n",
+			__func__, __LINE__,
+			cmd.opcode, cmd.cdw10, cmd.cdw11, cmd.cdw12, cmd.nsid);
+*/
 
 	if (cmd.timeout_ms)
 		timeout = msecs_to_jiffies(cmd.timeout_ms);
@@ -1248,6 +1281,15 @@ int nvme_init_identify(struct nvme_ctrl *ctrl)
 
 	ctrl->vid = le16_to_cpu(id->vid);
 	ctrl->oncs = le16_to_cpup(&id->oncs);
+	ctrl->oacs = le16_to_cpup(&id->oacs);
+	if (ctrl->oacs & NVME_CTRL_OACS_DIRECTIVE) {
+		ret = nvme_enable_directive(ctrl, 0xffffffff, NVME_DIR_STREAMS);
+		if (ret)
+			dev_err(ctrl->device, "Enabling streams directive failed (%d)\n", ret);
+		else
+			dev_info(ctrl->device, "Streams directive enabled.\n");
+		ret = 0;
+	}
 	atomic_set(&ctrl->abort_limit, id->acl + 1);
 	ctrl->vwc = id->vwc;
 	ctrl->cntlid = le16_to_cpup(&id->cntlid);

@@ -60,6 +60,9 @@ SYSCALL_DEFINE4(fadvise64_64, int, fd, loff_t, offset, loff_t, len, int, advice)
 		case POSIX_FADV_WILLNEED:
 		case POSIX_FADV_NOREUSE:
 		case POSIX_FADV_DONTNEED:
+		case POSIX_FADV_STREAM_ASSIGN:
+		case POSIX_FADV_STREAM_RELEASE:
+		case POSIX_FADV_STREAM_GET:
 			/* no bad return value, but ignore advice */
 			break;
 		default:
@@ -154,6 +157,70 @@ SYSCALL_DEFINE4(fadvise64_64, int, fd, loff_t, offset, loff_t, len, int, advice)
 						end_index);
 			}
 		}
+		break;
+	case POSIX_FADV_STREAM_ASSIGN:
+		/*
+		 * id is assigned in either file or inode indicated by len.
+		 * stream id is within 16-bit limits. 1 is the lowest valid
+		 * stream id, 0 is "normal write".
+		 * stream management is via bdi, if underlying
+		 * block device supports it.
+		 * TODO: get id from bdi
+		 *       assigned id with value in offset for testing now
+		 */
+		if (offset != (unsigned short) offset) {
+			ret = -EINVAL;
+			break;
+		}
+		if (len & ~(STREAM_F_FILE | STREAM_F_INODE)) {
+			ret = -EINVAL;
+			break;
+		}
+		if (len & STREAM_F_FILE) {
+			f.file->f_streamid = offset;
+		}
+		if (len & STREAM_F_INODE) {
+			spin_lock(&inode->i_lock);
+			inode->i_streamid = offset;
+			spin_unlock(&inode->i_lock);
+		}
+		break;
+	case POSIX_FADV_STREAM_RELEASE:
+		/*
+		 * stream management is via bdi, if underlying
+		 * block device supports it.
+		 * TODO: release id via bdi
+		 */
+		if (len & ~(STREAM_F_FILE | STREAM_F_INODE)) {
+			ret = -EINVAL;
+			break;
+		}
+		if (len & STREAM_F_FILE) {
+			f.file->f_streamid = 0;
+		}
+		else if (len & STREAM_F_INODE) {
+			spin_lock(&inode->i_lock);
+			inode->i_streamid = 0;
+			spin_unlock(&inode->i_lock);
+		}
+		else
+			return -EINVAL;
+		break;
+	case POSIX_FADV_STREAM_GET:
+		if (len & ~(STREAM_F_FILE | STREAM_F_INODE)) {
+			ret = -EINVAL;
+			break;
+		}
+		if (len & STREAM_F_FILE) {
+			ret = f.file->f_streamid;
+		}
+		else if (len & STREAM_F_INODE) {
+			spin_lock(&inode->i_lock);
+			ret = inode->i_streamid;
+			spin_unlock(&inode->i_lock);
+		}
+		else
+			return -EINVAL;
 		break;
 	default:
 		ret = -EINVAL;
